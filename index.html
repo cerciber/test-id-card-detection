@@ -1,0 +1,340 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+body{margin:0;overflow:hidden;background:black}
+video{display:none}
+canvas{
+  position:fixed;
+  left:0;
+  top:0;
+  width:100vw;
+  height:100vh;
+  object-fit:contain;
+}
+</style>
+<video id=v autoplay playsinline></video>
+<canvas id=out></canvas>
+<script src="https://docs.opencv.org/4.x/opencv.js"></script>
+<script>
+const v=document.getElementById('v'), out=document.getElementById('out');
+let w, h, tmp, tctx, src, gray, edges, lines;
+let linesHistory = []; // Mantener últimos 3 frames
+const HISTORY_SIZE = 3;
+
+// Dimensiones de los cuadros de detección (en píxeles o porcentajes del tamaño)
+// Cuadro externo (azul)
+const OUTER_WIDTH_RATIO = 0.70;   // 90% del ancho de la pantalla
+const OUTER_HEIGHT_RATIO = 0.60;  // 90% del alto de la pantalla
+
+// Cuadro interno (amarillo)
+const INNER_WIDTH_RATIO = 0.60;   // 50% del ancho de la pantalla
+const INNER_HEIGHT_RATIO = 0.50;  // 50% del alto de la pantalla
+
+function getLineAngle(x1, y1, x2, y2) {
+  return Math.atan2(y2 - y1, x2 - x1);
+}
+
+function areParallel(angle1, angle2, threshold = 0.15) {
+  let diff = Math.abs(angle1 - angle2);
+  return diff < threshold || diff > (Math.PI - threshold);
+}
+
+function getLineCenter(line) {
+  return {
+    x: (line.x1 + line.x2) / 2,
+    y: (line.y1 + line.y2) / 2
+  };
+}
+
+function isHorizontal(angle) {
+  // Horizontal si el ángulo está cerca de 0 o π
+  let absAngle = Math.abs(angle);
+  return absAngle < Math.PI/4 || absAngle > 3*Math.PI/4;
+}
+
+function lineIntersectsRect(x1, y1, x2, y2, rectX1, rectY1, rectX2, rectY2) {
+  // Verificar si el segmento de línea intersecta con el rectángulo
+  
+  // Si algún punto está dentro del rectángulo, hay intersección
+  if ((x1 >= rectX1 && x1 <= rectX2 && y1 >= rectY1 && y1 <= rectY2) ||
+      (x2 >= rectX1 && x2 <= rectX2 && y2 >= rectY1 && y2 <= rectY2)) {
+    return true;
+  }
+  
+  // Verificar intersección con cada uno de los 4 lados del rectángulo
+  // Lado superior
+  if (lineSegmentsIntersect(x1, y1, x2, y2, rectX1, rectY1, rectX2, rectY1)) return true;
+  // Lado inferior
+  if (lineSegmentsIntersect(x1, y1, x2, y2, rectX1, rectY2, rectX2, rectY2)) return true;
+  // Lado izquierdo
+  if (lineSegmentsIntersect(x1, y1, x2, y2, rectX1, rectY1, rectX1, rectY2)) return true;
+  // Lado derecho
+  if (lineSegmentsIntersect(x1, y1, x2, y2, rectX2, rectY1, rectX2, rectY2)) return true;
+  
+  return false;
+}
+
+function lineSegmentsIntersect(x1, y1, x2, y2, x3, y3, x4, y4) {
+  // Verificar si dos segmentos de línea se intersectan
+  let denom = (y4 - y3) * (x2 - x1) - (x4 - x3) * (y2 - y1);
+  if (Math.abs(denom) < 0.0001) return false; // Paralelas
+  
+  let ua = ((x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)) / denom;
+  let ub = ((x2 - x1) * (y1 - y3) - (y2 - y1) * (x1 - x3)) / denom;
+  
+  return ua >= 0 && ua <= 1 && ub >= 0 && ub <= 1;
+}
+
+function areOnOppositeSides(line1, line2, screenWidth, screenHeight) {
+  let center1 = getLineCenter(line1);
+  let center2 = getLineCenter(line2);
+  
+  // Determinar si las líneas son más horizontales o verticales
+  let horizontal = isHorizontal(line1.angle);
+  
+  if (horizontal) {
+    // Para líneas horizontales: una arriba y otra abajo
+    let midY = screenHeight / 2;
+    let margin = screenHeight * 0.15; // Margen del 15% para asegurar separación
+    
+    // Una debe estar claramente arriba y otra claramente abajo
+    let line1Top = center1.y < midY - margin;
+    let line1Bottom = center1.y > midY + margin;
+    let line2Top = center2.y < midY - margin;
+    let line2Bottom = center2.y > midY + margin;
+    
+    return (line1Top && line2Bottom) || (line1Bottom && line2Top);
+  } else {
+    // Para líneas verticales: una a la izquierda y otra a la derecha
+    let midX = screenWidth / 2;
+    let margin = screenWidth * 0.15; // Margen del 15% para asegurar separación
+    
+    // Una debe estar claramente a la izquierda y otra a la derecha
+    let line1Left = center1.x < midX - margin;
+    let line1Right = center1.x > midX + margin;
+    let line2Left = center2.x < midX - margin;
+    let line2Right = center2.x > midX + margin;
+    
+    return (line1Left && line2Right) || (line1Right && line2Left);
+  }
+}
+
+navigator.mediaDevices.getUserMedia({video:true}).then(s=>{
+  v.srcObject=s;
+  v.addEventListener('loadedmetadata', initProcessing);
+});
+
+function initProcessing(){
+  w = v.videoWidth;
+  h = v.videoHeight;
+  
+  out.width = w;
+  out.height = h;
+  
+  tmp = document.createElement('canvas');
+  tmp.width = w;
+  tmp.height = h;
+  tctx = tmp.getContext('2d');
+  
+  src = new cv.Mat(h, w, cv.CV_8UC4);
+  gray = new cv.Mat();
+  edges = new cv.Mat();
+  lines = new cv.Mat();
+  
+  requestAnimationFrame(loop);
+}
+
+function loop(){
+  tctx.drawImage(v, 0, 0, w, h);
+  src.data.set(tctx.getImageData(0, 0, w, h).data);
+  
+  let dst = src.clone();
+  
+  // 1. Convertir a escala de grises
+  cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+  
+  // 2. GaussianBlur
+  cv.GaussianBlur(gray, gray, new cv.Size(5, 5), 5, 5);
+  
+  // 3. Canny
+  cv.Canny(gray, edges, 30, 80, 3, false);
+  
+  // 4. Detectar líneas con HoughLinesP
+  lines.delete();
+  lines = new cv.Mat();
+  // HoughLinesP(imagen, salida, rho, theta, threshold, minLineLength, maxLineGap)
+  cv.HoughLinesP(edges, lines, 1, Math.PI / 180, 50, 50, 10);
+  
+  // 5. Guardar líneas del frame actual en el historial
+  let currentFrameLines = [];
+  for (let i = 0; i < lines.rows; i++) {
+    let x1 = lines.data32S[i * 4];
+    let y1 = lines.data32S[i * 4 + 1];
+    let x2 = lines.data32S[i * 4 + 2];
+    let y2 = lines.data32S[i * 4 + 3];
+    
+    currentFrameLines.push({ x1, y1, x2, y2 });
+  }
+  
+  // Agregar al historial
+  linesHistory.push(currentFrameLines);
+  
+  // Mantener solo los últimos 3 frames
+  if (linesHistory.length > HISTORY_SIZE) {
+    linesHistory.shift();
+  }
+  
+  // 6. Calcular áreas de detección centradas
+  
+  // Cuadro externo
+  let outerWidth = w * OUTER_WIDTH_RATIO;
+  let outerHeight = h * OUTER_HEIGHT_RATIO;
+  let outerX1 = (w - outerWidth) / 2;
+  let outerY1 = (h - outerHeight) / 2;
+  let outerX2 = outerX1 + outerWidth;
+  let outerY2 = outerY1 + outerHeight;
+  
+  // Cuadro interno
+  let innerWidth = w * INNER_WIDTH_RATIO;
+  let innerHeight = h * INNER_HEIGHT_RATIO;
+  let innerX1 = (w - innerWidth) / 2;
+  let innerY1 = (h - innerHeight) / 2;
+  let innerX2 = innerX1 + innerWidth;
+  let innerY2 = innerY1 + innerHeight;
+  
+  // 6b. Recolectar líneas que estén ENTRE el cuadro externo y el interno
+  let allLines = [];
+  for (let frameIdx = 0; frameIdx < linesHistory.length; frameIdx++) {
+    let alpha = (frameIdx + 1) / linesHistory.length;
+    let intensity = Math.round(100 + (155 * alpha));
+    
+    for (let line of linesHistory[frameIdx]) {
+      // Verificar que la línea esté dentro del cuadro externo
+      let insideOuter = 
+        line.x1 >= outerX1 && line.x1 <= outerX2 &&
+        line.y1 >= outerY1 && line.y1 <= outerY2 &&
+        line.x2 >= outerX1 && line.x2 <= outerX2 &&
+        line.y2 >= outerY1 && line.y2 <= outerY2;
+      
+      // Verificar que la línea NO intersecte con el cuadro interno
+      let doesNotIntersectInner = !lineIntersectsRect(
+        line.x1, line.y1, line.x2, line.y2,
+        innerX1, innerY1, innerX2, innerY2
+      );
+      
+      // Solo aceptar líneas dentro del externo que NO toquen ni crucen el interno
+      if (insideOuter && doesNotIntersectInner) {
+        let angle = getLineAngle(line.x1, line.y1, line.x2, line.y2);
+        allLines.push({ ...line, angle, intensity });
+      }
+    }
+  }
+  
+  // 7. Filtrar: solo líneas que tienen una paralela en el lado opuesto
+  let filteredLines = [];
+  for (let i = 0; i < allLines.length; i++) {
+    let hasOppositeParallel = false;
+    
+    for (let j = 0; j < allLines.length; j++) {
+      if (i === j) continue;
+      
+      // Debe ser paralela Y estar en el lado opuesto
+      if (areParallel(allLines[i].angle, allLines[j].angle) &&
+          areOnOppositeSides(allLines[i], allLines[j], w, h)) {
+        hasOppositeParallel = true;
+        break;
+      }
+    }
+    
+    if (hasOppositeParallel) {
+      filteredLines.push(allLines[i]);
+    }
+  }
+  
+  // 8. Dibujar cuadros de detección
+  
+  // Dibujar cuadro EXTERNO en azul
+  cv.rectangle(dst,
+    new cv.Point(Math.round(outerX1), Math.round(outerY1)),
+    new cv.Point(Math.round(outerX2), Math.round(outerY2)),
+    new cv.Scalar(0, 150, 255, 255), 3);
+  
+  // Dibujar cuadro INTERNO en amarillo
+  cv.rectangle(dst,
+    new cv.Point(Math.round(innerX1), Math.round(innerY1)),
+    new cv.Point(Math.round(innerX2), Math.round(innerY2)),
+    new cv.Scalar(0, 255, 255, 255), 3);
+  
+  // 9. Clasificar líneas por lado del marco
+  let topLines = 0, bottomLines = 0, leftLines = 0, rightLines = 0;
+  
+  for (let line of filteredLines) {
+    let center = getLineCenter(line);
+    let horizontal = isHorizontal(line.angle);
+    
+    if (horizontal) {
+      // Línea horizontal: está arriba o abajo?
+      if (center.y < h / 2) {
+        topLines++;
+      } else {
+        bottomLines++;
+      }
+    } else {
+      // Línea vertical: está a la izquierda o derecha?
+      if (center.x < w / 2) {
+        leftLines++;
+      } else {
+        rightLines++;
+      }
+    }
+  }
+  
+  // 10. Determinar si hay documento completo
+  let documentDetected = topLines > 0 && bottomLines > 0 && leftLines > 0 && rightLines > 0;
+  
+  // 11. Dibujar mensaje discreto en la esquina superior izquierda
+  let message = documentDetected ? 'DOCUMENTO OK' : 'SIN DOCUMENTO';
+  let messageColor = documentDetected ? 
+    new cv.Scalar(0, 255, 0, 255) :  // Verde
+    new cv.Scalar(255, 100, 100, 255);   // Rojo suave
+  
+  // Dibujar fondo pequeño
+  let msgWidth = 220;
+  let msgHeight = 50;
+  let msgX = 20;
+  let msgY = 20;
+  
+  cv.rectangle(dst,
+    new cv.Point(msgX, msgY),
+    new cv.Point(msgX + msgWidth, msgY + msgHeight),
+    new cv.Scalar(0, 0, 0, 180), -1);
+  
+  // Dibujar borde
+  cv.rectangle(dst,
+    new cv.Point(msgX, msgY),
+    new cv.Point(msgX + msgWidth, msgY + msgHeight),
+    messageColor, 2);
+  
+  // Dibujar texto
+  cv.putText(dst, message,
+    new cv.Point(msgX + 15, msgY + 35),
+    cv.FONT_HERSHEY_SIMPLEX, 0.65, messageColor, 2);
+  
+  // 12. Dibujar las líneas filtradas
+  for (let line of filteredLines) {
+    let point1 = new cv.Point(line.x1, line.y1);
+    let point2 = new cv.Point(line.x2, line.y2);
+    
+    // Dibujar línea con intensidad según antigüedad
+    cv.line(dst, point1, point2, new cv.Scalar(0, line.intensity, 0, 255), 2);
+  }
+  
+  cv.imshow(out, dst);
+  dst.delete();
+  requestAnimationFrame(loop);
+}
+
+cv['onRuntimeInitialized'] = () => {
+  // OpenCV listo
+};
+</script>
