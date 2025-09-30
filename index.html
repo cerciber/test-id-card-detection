@@ -18,8 +18,10 @@ canvas{
 <script>
 const v=document.getElementById('v'), out=document.getElementById('out');
 let w, h, tmp, tctx, src, gray, edges, lines;
-let linesHistory = []; // Mantener últimos 3 frames
-const HISTORY_SIZE = 3;
+let linesHistory = []; // Mantener últimos 2 frames (optimizado)
+const HISTORY_SIZE = 2;
+let frameCount = 0;
+const PROCESS_EVERY_N_FRAMES = 2; // Procesar solo cada 2 frames (optimización)
 
 // Dimensiones de los cuadros de detección
 // Proporción de aspecto de documento (tarjeta ID/crédito: 85.6mm x 53.98mm)
@@ -123,8 +125,8 @@ function areOnOppositeSides(line1, line2, screenWidth, screenHeight) {
 navigator.mediaDevices.getUserMedia({
   video: { 
     facingMode: 'environment', // Cámara trasera
-    width: { ideal: 1920 },
-    height: { ideal: 1080 }
+    width: { ideal: 1280 },  // Resolución más baja para móviles
+    height: { ideal: 720 }
   }
 }).then(s=>{
   v.srcObject=s;
@@ -152,6 +154,14 @@ function initProcessing(){
 }
 
 function loop(){
+  frameCount++;
+  
+  // Optimización: solo procesar cada N frames
+  if (frameCount % PROCESS_EVERY_N_FRAMES !== 0) {
+    requestAnimationFrame(loop);
+    return;
+  }
+  
   tctx.drawImage(v, 0, 0, w, h);
   src.data.set(tctx.getImageData(0, 0, w, h).data);
   
@@ -160,17 +170,18 @@ function loop(){
   // 1. Convertir a escala de grises
   cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
   
-  // 2. GaussianBlur
-  cv.GaussianBlur(gray, gray, new cv.Size(5, 5), 5, 5);
+  // 2. GaussianBlur (kernel más pequeño para mejor rendimiento)
+  cv.GaussianBlur(gray, gray, new cv.Size(3, 3), 0);
   
   // 3. Canny
   cv.Canny(gray, edges, 30, 80, 3, false);
   
-  // 4. Detectar líneas con HoughLinesP
+  // 4. Detectar líneas con HoughLinesP (ajustado para rendimiento)
   lines.delete();
   lines = new cv.Mat();
   // HoughLinesP(imagen, salida, rho, theta, threshold, minLineLength, maxLineGap)
-  cv.HoughLinesP(edges, lines, 1, Math.PI / 180, 50, 50, 10);
+  // threshold más alto = menos líneas detectadas = más rápido
+  cv.HoughLinesP(edges, lines, 1, Math.PI / 180, 60, 60, 15);
   
   // 5. Guardar líneas del frame actual en el historial
   let currentFrameLines = [];
@@ -327,15 +338,7 @@ function loop(){
     new cv.Point(msgX + 15, msgY + 35),
     cv.FONT_HERSHEY_SIMPLEX, 0.65, messageColor, 2);
   
-  // 12. Dibujar las líneas filtradas
-  for (let line of filteredLines) {
-    let point1 = new cv.Point(line.x1, line.y1);
-    let point2 = new cv.Point(line.x2, line.y2);
-    
-    // Dibujar línea con intensidad según antigüedad
-    cv.line(dst, point1, point2, new cv.Scalar(0, line.intensity, 0, 255), 2);
-  }
-  
+  // 12. Mostrar resultado (sin dibujar líneas para mejor rendimiento)
   cv.imshow(out, dst);
   dst.delete();
   requestAnimationFrame(loop);
