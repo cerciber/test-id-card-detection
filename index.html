@@ -21,14 +21,15 @@ let w, h, tmp, tctx, src, gray, edges, lines;
 let linesHistory = []; // Mantener últimos 3 frames
 const HISTORY_SIZE = 3;
 
-// Dimensiones de los cuadros de detección (en píxeles o porcentajes del tamaño)
-// Cuadro externo (azul)
-const OUTER_WIDTH_RATIO = 0.70;   // 90% del ancho de la pantalla
-const OUTER_HEIGHT_RATIO = 0.60;  // 90% del alto de la pantalla
+// Dimensiones de los cuadros de detección
+// Proporción de aspecto de documento (tarjeta ID/crédito: 85.6mm x 53.98mm)
+const DOCUMENT_ASPECT_RATIO = 1.586; // ancho / alto (8:5 aproximadamente)
 
-// Cuadro interno (amarillo)
-const INNER_WIDTH_RATIO = 0.60;   // 50% del ancho de la pantalla
-const INNER_HEIGHT_RATIO = 0.50;  // 50% del alto de la pantalla
+// Cuadro externo (azul) - basado en ancho de pantalla
+const OUTER_WIDTH_RATIO = 0.85;   // 85% del ancho de la pantalla
+
+// Cuadro interno (amarillo) - más pequeño que el externo
+const INNER_WIDTH_RATIO = 0.70;   // 70% del ancho de la pantalla
 
 function getLineAngle(x1, y1, x2, y2) {
   return Math.atan2(y2 - y1, x2 - x1);
@@ -119,7 +120,13 @@ function areOnOppositeSides(line1, line2, screenWidth, screenHeight) {
   }
 }
 
-navigator.mediaDevices.getUserMedia({video:true}).then(s=>{
+navigator.mediaDevices.getUserMedia({
+  video: { 
+    facingMode: 'environment', // Cámara trasera
+    width: { ideal: 1920 },
+    height: { ideal: 1080 }
+  }
+}).then(s=>{
   v.srcObject=s;
   v.addEventListener('loadedmetadata', initProcessing);
 });
@@ -184,19 +191,19 @@ function loop(){
     linesHistory.shift();
   }
   
-  // 6. Calcular áreas de detección centradas
+  // 6. Calcular áreas de detección centradas (con proporción de documento)
   
-  // Cuadro externo
+  // Cuadro externo - ancho basado en pantalla, alto según aspect ratio del documento
   let outerWidth = w * OUTER_WIDTH_RATIO;
-  let outerHeight = h * OUTER_HEIGHT_RATIO;
+  let outerHeight = outerWidth / DOCUMENT_ASPECT_RATIO; // Mantener proporción del documento
   let outerX1 = (w - outerWidth) / 2;
   let outerY1 = (h - outerHeight) / 2;
   let outerX2 = outerX1 + outerWidth;
   let outerY2 = outerY1 + outerHeight;
   
-  // Cuadro interno
+  // Cuadro interno - ancho basado en pantalla, alto según aspect ratio del documento
   let innerWidth = w * INNER_WIDTH_RATIO;
-  let innerHeight = h * INNER_HEIGHT_RATIO;
+  let innerHeight = innerWidth / DOCUMENT_ASPECT_RATIO; // Mantener proporción del documento
   let innerX1 = (w - innerWidth) / 2;
   let innerY1 = (h - innerHeight) / 2;
   let innerX2 = innerX1 + innerWidth;
