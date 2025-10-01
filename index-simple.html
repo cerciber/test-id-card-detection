@@ -1,0 +1,244 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+body{margin:0;overflow:hidden;background:black}
+video{display:none}
+canvas{
+  position:fixed;
+  left:0;
+  top:0;
+  width:100vw;
+  height:100vh;
+  object-fit:contain;
+}
+</style>
+<video id=v autoplay playsinline></video>
+<canvas id=out></canvas>
+<script src="https://docs.opencv.org/4.x/opencv.js"></script>
+<script>
+const v=document.getElementById('v'), out=document.getElementById('out');
+let w, h, tmp, tctx, src, gray, edges;
+let frameCount = 0;
+
+// Dimensiones de los cuadros
+const DOCUMENT_ASPECT_RATIO = 1.586;
+const OUTER_WIDTH_RATIO = 0.85;
+const INNER_WIDTH_RATIO = 0.70;
+
+// Procesar cada N frames (más rápido)
+const PROCESS_EVERY_N_FRAMES = 2;
+
+// Factor de escala (procesar a menor resolución)
+const SCALE_FACTOR = 3; // Reducir a 1/3 = mucho más rápido
+
+// Threshold: cuántos píxeles de borde necesitamos en cada lado para considerarlo detectado
+const MIN_EDGE_PIXELS = 50;
+
+navigator.mediaDevices.getUserMedia({
+  video: { 
+    facingMode: 'environment',
+    width: { ideal: 1280 },
+    height: { ideal: 720 }
+  }
+}).then(s=>{
+  v.srcObject=s;
+  v.addEventListener('loadedmetadata', initProcessing);
+});
+
+function initProcessing(){
+  w = v.videoWidth;
+  h = v.videoHeight;
+  
+  out.width = w;
+  out.height = h;
+  
+  tmp = document.createElement('canvas');
+  tmp.width = w;
+  tmp.height = h;
+  tctx = tmp.getContext('2d');
+  
+  src = new cv.Mat(h, w, cv.CV_8UC4);
+  gray = new cv.Mat();
+  edges = new cv.Mat();
+  
+  requestAnimationFrame(loop);
+}
+
+// Estado de detección
+let hasTop = false, hasBottom = false, hasLeft = false, hasRight = false;
+
+function loop(){
+  frameCount++;
+  
+  tctx.drawImage(v, 0, 0, w, h);
+  src.data.set(tctx.getImageData(0, 0, w, h).data);
+  
+  let dst = src.clone();
+  
+  // Calcular dimensiones de los cuadros
+  let outerWidth = w * OUTER_WIDTH_RATIO;
+  let outerHeight = outerWidth / DOCUMENT_ASPECT_RATIO;
+  let outerX1 = (w - outerWidth) / 2;
+  let outerY1 = (h - outerHeight) / 2;
+  let outerX2 = outerX1 + outerWidth;
+  let outerY2 = outerY1 + outerHeight;
+  
+  let innerWidth = w * INNER_WIDTH_RATIO;
+  let innerHeight = innerWidth / DOCUMENT_ASPECT_RATIO;
+  let innerX1 = (w - innerWidth) / 2;
+  let innerY1 = (h - innerHeight) / 2;
+  let innerX2 = innerX1 + innerWidth;
+  let innerY2 = innerY1 + innerHeight;
+  
+  // Solo procesar cada N frames
+  if (frameCount % PROCESS_EVERY_N_FRAMES === 0) {
+    // Reducir resolución drásticamente
+    let smallW = Math.floor(w / SCALE_FACTOR);
+    let smallH = Math.floor(h / SCALE_FACTOR);
+    let small = new cv.Mat();
+    cv.resize(src, small, new cv.Size(smallW, smallH));
+    
+    // Convertir a grises y detectar bordes
+    cv.cvtColor(small, gray, cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(gray, gray, new cv.Size(3, 3), 0);
+    cv.Canny(gray, edges, 50, 150, 3, false);
+    
+    // Calcular regiones del margen en escala reducida
+    let sOuterX1 = Math.floor(outerX1 / SCALE_FACTOR);
+    let sOuterY1 = Math.floor(outerY1 / SCALE_FACTOR);
+    let sOuterX2 = Math.floor(outerX2 / SCALE_FACTOR);
+    let sOuterY2 = Math.floor(outerY2 / SCALE_FACTOR);
+    
+    let sInnerX1 = Math.floor(innerX1 / SCALE_FACTOR);
+    let sInnerY1 = Math.floor(innerY1 / SCALE_FACTOR);
+    let sInnerX2 = Math.floor(innerX2 / SCALE_FACTOR);
+    let sInnerY2 = Math.floor(innerY2 / SCALE_FACTOR);
+    
+    // Contar píxeles blancos (bordes) en cada región del margen
+    let topCount = 0, bottomCount = 0, leftCount = 0, rightCount = 0;
+    
+    // Región SUPERIOR (entre outerY1 e innerY1)
+    for (let y = sOuterY1; y < sInnerY1; y++) {
+      for (let x = sOuterX1; x < sOuterX2; x++) {
+        if (edges.ucharPtr(y, x)[0] > 0) topCount++;
+      }
+    }
+    
+    // Región INFERIOR (entre innerY2 y outerY2)
+    for (let y = sInnerY2; y < sOuterY2; y++) {
+      for (let x = sOuterX1; x < sOuterX2; x++) {
+        if (edges.ucharPtr(y, x)[0] > 0) bottomCount++;
+      }
+    }
+    
+    // Región IZQUIERDA (entre outerX1 e innerX1)
+    for (let y = sOuterY1; y < sOuterY2; y++) {
+      for (let x = sOuterX1; x < sInnerX1; x++) {
+        if (edges.ucharPtr(y, x)[0] > 0) leftCount++;
+      }
+    }
+    
+    // Región DERECHA (entre innerX2 y outerX2)
+    for (let y = sOuterY1; y < sOuterY2; y++) {
+      for (let x = sInnerX2; x < sOuterX2; x++) {
+        if (edges.ucharPtr(y, x)[0] > 0) rightCount++;
+      }
+    }
+    
+    // Actualizar estado
+    hasTop = topCount > MIN_EDGE_PIXELS;
+    hasBottom = bottomCount > MIN_EDGE_PIXELS;
+    hasLeft = leftCount > MIN_EDGE_PIXELS;
+    hasRight = rightCount > MIN_EDGE_PIXELS;
+    
+    small.delete();
+  }
+  
+  // Dibujar cuadro EXTERNO en azul
+  cv.rectangle(dst,
+    new cv.Point(Math.round(outerX1), Math.round(outerY1)),
+    new cv.Point(Math.round(outerX2), Math.round(outerY2)),
+    new cv.Scalar(0, 150, 255, 255), 3);
+  
+  // Dibujar cuadro INTERNO en amarillo
+  cv.rectangle(dst,
+    new cv.Point(Math.round(innerX1), Math.round(innerY1)),
+    new cv.Point(Math.round(innerX2), Math.round(innerY2)),
+    new cv.Scalar(0, 255, 255, 255), 3);
+  
+  // Dibujar indicadores visuales en cada lado detectado
+  if (hasTop) {
+    cv.line(dst,
+      new cv.Point(outerX1, outerY1 + 10),
+      new cv.Point(outerX2, outerY1 + 10),
+      new cv.Scalar(0, 255, 0, 255), 4);
+  }
+  
+  if (hasBottom) {
+    cv.line(dst,
+      new cv.Point(outerX1, outerY2 - 10),
+      new cv.Point(outerX2, outerY2 - 10),
+      new cv.Scalar(0, 255, 0, 255), 4);
+  }
+  
+  if (hasLeft) {
+    cv.line(dst,
+      new cv.Point(outerX1 + 10, outerY1),
+      new cv.Point(outerX1 + 10, outerY2),
+      new cv.Scalar(0, 255, 0, 255), 4);
+  }
+  
+  if (hasRight) {
+    cv.line(dst,
+      new cv.Point(outerX2 - 10, outerY1),
+      new cv.Point(outerX2 - 10, outerY2),
+      new cv.Scalar(0, 255, 0, 255), 4);
+  }
+  
+  // Mensaje
+  let sidesDetected = [];
+  if (hasTop) sidesDetected.push('ARRIBA');
+  if (hasBottom) sidesDetected.push('ABAJO');
+  if (hasLeft) sidesDetected.push('IZQUIERDA');
+  if (hasRight) sidesDetected.push('DERECHA');
+  
+  let documentDetected = hasTop && hasBottom && hasLeft && hasRight;
+  let message = documentDetected ? 
+    'DOCUMENTO OK - 4 LADOS' : 
+    (sidesDetected.length > 0 ? 
+      sidesDetected.join(' + ') : 
+      'SIN DOCUMENTO');
+  
+  let messageColor = documentDetected ? 
+    new cv.Scalar(0, 255, 0, 255) :
+    new cv.Scalar(255, 100, 100, 255);
+  
+  // Fondo del mensaje
+  let msgWidth = 280;
+  let msgHeight = 50;
+  let msgX = 20;
+  let msgY = 20;
+  
+  cv.rectangle(dst,
+    new cv.Point(msgX, msgY),
+    new cv.Point(msgX + msgWidth, msgY + msgHeight),
+    new cv.Scalar(0, 0, 0, 180), -1);
+  
+  cv.rectangle(dst,
+    new cv.Point(msgX, msgY),
+    new cv.Point(msgX + msgWidth, msgY + msgHeight),
+    messageColor, 2);
+  
+  cv.putText(dst, message,
+    new cv.Point(msgX + 10, msgY + 35),
+    cv.FONT_HERSHEY_SIMPLEX, 0.55, messageColor, 2);
+  
+  cv.imshow(out, dst);
+  dst.delete();
+  requestAnimationFrame(loop);
+}
+
+cv['onRuntimeInitialized'] = () => {
+  // OpenCV listo
+};
+</script>
